@@ -1,0 +1,37 @@
+version: "3.1"
+
+nlu:
+  - intent: greet
+    examples: |
+      - hi
+      - hello
+      - hey
+
+  - intent: start_blackjack
+    examples: |
+      - let's play blackjack
+      - help me with blackjack
+      - I want blackjack advice
+      - start a blackjack hand
+      - can you tell me whether to hit or stand
+
+  - intent: hit
+    examples: |
+      - hit
+      - I'll hit
+      - take another card
+      - one more card
+
+  - intent: stand
+    examples: |
+      - stand
+      - I'll stand
+      - stay
+      - no more cards
+
+  - intent: new_round
+    examples: |
+      - new hand
+      - start over
+      - play again
+      - reset the game

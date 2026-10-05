@@ -1,0 +1,90 @@
+version: "3.1"
+
+intents:
+  - greet
+  - start_blackjack
+  - hit
+  - stand
+  - new_round
+
+slots:
+  user_input:
+    type: text
+    mappings:
+      - type: from_text
+
+  input_valid:
+    type: bool
+    mappings:
+      - type: custom
+
+  player_hand:
+    type: any
+    mappings:
+      - type: custom
+
+  dealer_upcard:
+    type: text
+    mappings:
+      - type: custom
+
+  player_move:
+    type: categorical
+    values: [hit, stand]
+    mappings:
+      - type: from_intent
+        intent: hit
+        value: hit
+      - type: from_intent
+        intent: stand
+        value: stand
+
+  hand_value:
+    type: float
+    mappings:
+      - type: custom
+
+  is_soft_hand:
+    type: bool
+    mappings:
+      - type: custom
+
+  game_status:
+    type: categorical
+    values: [collecting, active, bust, stood, blackjack]
+    mappings:
+      - type: custom
+
+  recommendation:
+    type: categorical
+    values: [hit, stand]
+    mappings:
+      - type: custom
+
+responses:
+  utter_greet:
+    - text: "Hi! I can give hit-or-stand blackjack advice."
+  utter_ask_initial_hand:
+    - text: "What are your first two cards? For example: ace and 7."
+  utter_invalid_initial_hand:
+    - text: "I need exactly two card ranks, such as '10 and 4' or 'ace and 7'."
+  utter_ask_dealer_card:
+    - text: "What card is the dealer showing?"
+  utter_invalid_dealer_card:
+    - text: "Please give exactly one dealer card, such as '6' or 'ace'."
+  utter_ask_move:
+    - text: "Do you want to hit or stand?"
+  utter_ask_next_card:
+    - text: "What card did you draw?"
+  utter_invalid_next_card:
+    - text: "Please give one card rank, such as '3', '10', or 'queen'."
+  utter_round_complete:
+    - text: "Round complete. Say 'new hand' when you want to play again."
+
+actions:
+  - action_start_blackjack
+  - action_record_initial_hand
+  - action_record_dealer_card
+  - action_evaluate_blackjack
+  - action_record_next_card
+  - action_stand_blackjack

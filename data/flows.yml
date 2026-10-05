@@ -1,0 +1,76 @@
+flows:
+  blackjack_round:
+    description: Play one blackjack round and give hit-or-stand advice.
+    nlu_trigger:
+      - intent: greet
+      - intent: start_blackjack
+      - intent: new_round
+    steps:
+      - action: action_start_blackjack
+      - action: utter_greet
+
+      - id: get_initial_hand
+        collect: user_input
+        description: The player's first two card ranks in one message.
+        utter: utter_ask_initial_hand
+        ask_before_filling: true
+        next: parse_initial_hand
+
+      - id: parse_initial_hand
+        action: action_record_initial_hand
+        next:
+          - if: slots.input_valid
+            then: get_dealer_card
+          - else: get_initial_hand
+
+      - id: get_dealer_card
+        collect: user_input
+        description: The dealer's one visible card rank.
+        utter: utter_ask_dealer_card
+        ask_before_filling: true
+        next: parse_dealer_card
+
+      - id: parse_dealer_card
+        action: action_record_dealer_card
+        next:
+          - if: slots.input_valid
+            then: evaluate_hand
+          - else: get_dealer_card
+
+      - id: evaluate_hand
+        action: action_evaluate_blackjack
+        next:
+          - if: slots.game_status = "bust" or slots.game_status = "blackjack"
+            then: round_complete
+          - else: get_player_move
+
+      - id: get_player_move
+        collect: player_move
+        description: Whether the player chooses to hit or stand.
+        utter: utter_ask_move
+        ask_before_filling: true
+        next:
+          - if: slots.player_move = "stand"
+            then: stand_hand
+          - else: get_next_card
+
+      - id: get_next_card
+        collect: user_input
+        description: The one card drawn after choosing hit.
+        utter: utter_ask_next_card
+        ask_before_filling: true
+        next: parse_next_card
+
+      - id: parse_next_card
+        action: action_record_next_card
+        next:
+          - if: slots.input_valid
+            then: evaluate_hand
+          - else: get_next_card
+
+      - id: stand_hand
+        action: action_stand_blackjack
+        next: round_complete
+
+      - id: round_complete
+        action: utter_round_complete
