@@ -3,9 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import requests
 from rasa_sdk import Action, Tracker
 from rasa_sdk.events import EventType, SlotSet
 from rasa_sdk.executor import CollectingDispatcher
+from rasa_sdk.forms import ValidationAction
 
 
 CARD_VALUES = {
@@ -20,6 +22,8 @@ CARD_PATTERN = re.compile(
     r"(?<![a-z0-9])(ace|[2-9]|10|jack|queen|king|one|two|three|four|five|six|seven|eight|nine|ten)(?![a-z0-9])",
     re.IGNORECASE,
 )
+DECK_API = "https://deckofcardsapi.com/api/deck"
+DEFAULT_DECK_COUNT = 6
 
 
 def extract_cards(text: str) -> list[str]:
@@ -53,6 +57,72 @@ def basic_hit_or_stand(total: int, soft: bool, dealer: str) -> str:
     if 13 <= total <= 16:
         return "stand" if dealer_total in {2, 3, 4, 5, 6} else "hit"
     return "stand"
+
+
+def parse_money(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"\d+(?:\.\d{1,2})?", str(value or "").replace(",", ""))
+    return float(match.group()) if match else None
+
+
+def api_rank(card: dict[str, Any]) -> str:
+    value = str(card["value"]).lower()
+    return "ace" if value == "ace" else value
+
+
+def card_name(card: dict[str, Any]) -> str:
+    return f"{str(card['value']).title()} of {str(card['suit']).title()}"
+
+
+def api_hand_score(cards: list[dict[str, Any]]) -> tuple[int, bool]:
+    return score_hand([api_rank(card) for card in cards])
+
+
+def deck_request(path: str, **params: Any) -> dict[str, Any]:
+    response = requests.get(f"{DECK_API}/{path}", params=params, timeout=10)
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("success"):
+        raise ValueError("Deck of Cards API returned an unsuccessful response")
+    return payload
+
+
+def draw_cards(deck_id: str, count: int) -> tuple[list[dict[str, Any]], int]:
+    payload = deck_request(f"{deck_id}/draw/", count=count)
+    cards = payload.get("cards", [])
+    if len(cards) != count:
+        raise ValueError("Deck of Cards API returned too few cards")
+    return cards, int(payload["remaining"])
+
+
+def settle_round(
+    dispatcher: CollectingDispatcher,
+    balance: float,
+    bet: float,
+    result: str,
+) -> list[EventType]:
+    if result == "win":
+        balance += bet * 2
+        message = f"You win ${bet * 2:.2f}. Your balance is ${balance:.2f}."
+    elif result == "push":
+        balance += bet
+        message = f"Push—your ${bet:.2f} bet is returned. Your balance is ${balance:.2f}."
+    else:
+        message = f"Dealer wins. Your balance is ${balance:.2f}."
+
+    dispatcher.utter_message(text=message)
+    if balance <= 0:
+        dispatcher.utter_message(text="Your balance is $0.00, so the practice session is over.")
+        status = "session_complete"
+    else:
+        status = "round_complete"
+    return [
+        SlotSet("practice_balance", balance),
+        SlotSet("practice_status", status),
+        SlotSet("round_result", result),
+        SlotSet("player_move", None),
+    ]
 
 
 class StartBlackjack(Action):
@@ -135,3 +205,234 @@ class StandBlackjack(Action):
         total = tracker.get_slot("hand_value")
         dispatcher.utter_message(text=f"You stand on {total}.")
         return [SlotSet("game_status", "stood")]
+
+
+class ValidatePracticeBlackjack(ValidationAction):
+    async def validate_starting_balance(
+        self, value: Any, dispatcher: CollectingDispatcher,
+        tracker: Tracker, domain: dict[str, Any],
+    ) -> dict[str, Any]:
+        balance = parse_money(value)
+        if balance is None or balance <= 0:
+            dispatcher.utter_message(text="Enter a starting balance greater than $0.")
+            return {"starting_balance": None}
+        return {"starting_balance": balance}
+
+    async def validate_practice_bet(
+        self, value: Any, dispatcher: CollectingDispatcher,
+        tracker: Tracker, domain: dict[str, Any],
+    ) -> dict[str, Any]:
+        bet = parse_money(value)
+        balance = float(tracker.get_slot("practice_balance") or 0)
+        if bet is None or bet <= 0:
+            dispatcher.utter_message(text="Your bet must be greater than $0.")
+            return {"practice_bet": None}
+        if bet > balance:
+            dispatcher.utter_message(
+                text=f"That bet is higher than your ${balance:.2f} balance. Choose a smaller bet."
+            )
+            return {"practice_bet": None}
+        return {"practice_bet": bet}
+
+
+class StartPracticeBlackjack(Action):
+    def name(self) -> str:
+        return "action_start_practice_blackjack"
+
+    def run(self, dispatcher: CollectingDispatcher, tracker: Tracker,
+            domain: dict[str, Any]) -> list[EventType]:
+        balance = parse_money(tracker.get_slot("starting_balance"))
+        if balance is None or balance <= 0:
+            dispatcher.utter_message(text="Enter a starting balance greater than $0.")
+            return [SlotSet("starting_balance", None), SlotSet("practice_status", "awaiting_balance")]
+
+        try:
+            payload = deck_request("new/shuffle/", deck_count=DEFAULT_DECK_COUNT)
+        except (requests.RequestException, ValueError, KeyError):
+            dispatcher.utter_message(
+                text="I couldn't set up the card shoe through the Deck of Cards API. Please try again."
+            )
+            return [SlotSet("practice_status", "api_error")]
+
+        dispatcher.utter_message(
+            text=f"Your starting balance is ${balance:.2f}. The {DEFAULT_DECK_COUNT}-deck shoe is ready."
+        )
+        return [
+            SlotSet("practice_balance", balance),
+            SlotSet("practice_deck_id", payload["deck_id"]),
+            SlotSet("cards_remaining", payload["remaining"]),
+            SlotSet("practice_bet", None),
+            SlotSet("practice_player_hand", []),
+            SlotSet("practice_dealer_hand", []),
+            SlotSet("dealer_hole_card", None),
+            SlotSet("round_result", None),
+            SlotSet("continue_playing", None),
+            SlotSet("practice_status", "awaiting_bet"),
+        ]
+
+
+class DealPracticeBlackjack(Action):
+    def name(self) -> str:
+        return "action_deal_practice_blackjack"
+
+    def run(self, dispatcher: CollectingDispatcher, tracker: Tracker,
+            domain: dict[str, Any]) -> list[EventType]:
+        balance = float(tracker.get_slot("practice_balance") or 0)
+        bet = parse_money(tracker.get_slot("practice_bet"))
+        deck_id = tracker.get_slot("practice_deck_id")
+
+        if bet is None or bet <= 0 or bet > balance:
+            dispatcher.utter_message(
+                text=f"Choose a bet between $0.01 and your ${balance:.2f} balance."
+            )
+            return [SlotSet("practice_bet", None), SlotSet("practice_status", "awaiting_bet")]
+        if not deck_id:
+            dispatcher.utter_message(text="The card shoe has not been set up yet.")
+            return [SlotSet("practice_status", "awaiting_balance")]
+
+        try:
+            remaining = int(tracker.get_slot("cards_remaining") or 0)
+            if remaining < 20:
+                shuffled = deck_request(f"{deck_id}/shuffle/")
+                remaining = int(shuffled["remaining"])
+                dispatcher.utter_message(text="The shoe was running low, so the dealer reshuffled it.")
+            cards, remaining = draw_cards(str(deck_id), 4)
+        except (requests.RequestException, ValueError, KeyError):
+            dispatcher.utter_message(text="I couldn't draw cards from the API. Your bet was not charged.")
+            return [SlotSet("practice_status", "api_error")]
+
+        player_hand = [cards[0], cards[2]]
+        dealer_hand = [cards[1], cards[3]]
+        balance -= bet
+        player_total, _ = api_hand_score(player_hand)
+        dealer_total, _ = api_hand_score(dealer_hand)
+
+        dispatcher.utter_message(
+            text=(
+                f"You bet ${bet:.2f}. Dealer shows {card_name(dealer_hand[0])}. "
+                f"You have {card_name(player_hand[0])} and {card_name(player_hand[1])} "
+                f"for {player_total}."
+            )
+        )
+
+        events: list[EventType] = [
+            SlotSet("practice_balance", balance),
+            SlotSet("practice_player_hand", player_hand),
+            SlotSet("practice_dealer_hand", dealer_hand),
+            SlotSet("dealer_upcard", api_rank(dealer_hand[0])),
+            SlotSet("dealer_hole_card", dealer_hand[1]),
+            SlotSet("cards_remaining", remaining),
+            SlotSet("practice_status", "player_turn"),
+            SlotSet("round_result", None),
+        ]
+
+        player_blackjack = player_total == 21
+        dealer_blackjack = dealer_total == 21
+        if player_blackjack or dealer_blackjack:
+            dispatcher.utter_message(
+                text=f"Dealer reveals {card_name(dealer_hand[1])} for {dealer_total}."
+            )
+            if player_blackjack and dealer_blackjack:
+                dispatcher.utter_message(text="Both have blackjack.")
+                result = "push"
+            elif player_blackjack:
+                dispatcher.utter_message(text="Blackjack—you win!")
+                result = "win"
+            else:
+                dispatcher.utter_message(text="Dealer has blackjack.")
+                result = "loss"
+            return events + settle_round(dispatcher, balance, bet, result)
+
+        dispatcher.utter_message(text="Would you like to hit or stand?")
+        return events
+
+
+class PlayPracticeBlackjackMove(Action):
+    def name(self) -> str:
+        return "action_play_practice_blackjack_move"
+
+    def run(self, dispatcher: CollectingDispatcher, tracker: Tracker,
+            domain: dict[str, Any]) -> list[EventType]:
+        move = tracker.get_slot("player_move")
+        deck_id = str(tracker.get_slot("practice_deck_id") or "")
+        player_hand = list(tracker.get_slot("practice_player_hand") or [])
+        dealer_hand = list(tracker.get_slot("practice_dealer_hand") or [])
+        balance = float(tracker.get_slot("practice_balance") or 0)
+        bet = float(tracker.get_slot("practice_bet") or 0)
+        remaining = int(tracker.get_slot("cards_remaining") or 0)
+        events: list[EventType] = []
+
+        try:
+            if move == "hit":
+                cards, remaining = draw_cards(deck_id, 1)
+                player_hand.append(cards[0])
+                total, _ = api_hand_score(player_hand)
+                dispatcher.utter_message(
+                    text=f"You draw {card_name(cards[0])}. Your total is {total}."
+                )
+                events.extend([
+                    SlotSet("practice_player_hand", player_hand),
+                    SlotSet("cards_remaining", remaining),
+                    SlotSet("player_move", None),
+                ])
+                if total > 21:
+                    dispatcher.utter_message(text="Bust.")
+                    return events + settle_round(dispatcher, balance, bet, "loss")
+                if total < 21:
+                    dispatcher.utter_message(text="Would you like to hit or stand?")
+                    return events
+
+            player_total, _ = api_hand_score(player_hand)
+            dealer_total, _ = api_hand_score(dealer_hand)
+            dispatcher.utter_message(
+                text=f"Dealer reveals {card_name(dealer_hand[1])} for {dealer_total}."
+            )
+            while dealer_total < 17:
+                cards, remaining = draw_cards(deck_id, 1)
+                dealer_hand.append(cards[0])
+                dealer_total, _ = api_hand_score(dealer_hand)
+                dispatcher.utter_message(
+                    text=f"Dealer draws {card_name(cards[0])} and now has {dealer_total}."
+                )
+        except (requests.RequestException, ValueError, KeyError):
+            dispatcher.utter_message(text="I couldn't draw from the API. The round is still active.")
+            return [SlotSet("practice_status", "api_error"), SlotSet("player_move", None)]
+
+        events.extend([
+            SlotSet("practice_dealer_hand", dealer_hand),
+            SlotSet("cards_remaining", remaining),
+        ])
+        if dealer_total > 21 or player_total > dealer_total:
+            result = "win"
+        elif player_total == dealer_total:
+            result = "push"
+        else:
+            result = "loss"
+        return events + settle_round(dispatcher, balance, bet, result)
+
+
+class ContinuePracticeBlackjack(Action):
+    def name(self) -> str:
+        return "action_continue_practice_blackjack"
+
+    def run(self, dispatcher: CollectingDispatcher, tracker: Tracker,
+            domain: dict[str, Any]) -> list[EventType]:
+        balance = float(tracker.get_slot("practice_balance") or 0)
+        if balance <= 0:
+            dispatcher.utter_message(text="Your balance is $0.00, so the practice session is over.")
+            return [SlotSet("practice_status", "session_complete")]
+        if not tracker.get_slot("continue_playing"):
+            dispatcher.utter_message(text=f"Session ended with a ${balance:.2f} balance.")
+            return [SlotSet("practice_status", "session_complete")]
+
+        dispatcher.utter_message(text=f"Your balance is ${balance:.2f}. Place your next bet.")
+        return [
+            SlotSet("practice_bet", None),
+            SlotSet("practice_player_hand", []),
+            SlotSet("practice_dealer_hand", []),
+            SlotSet("dealer_hole_card", None),
+            SlotSet("round_result", None),
+            SlotSet("player_move", None),
+            SlotSet("continue_playing", None),
+            SlotSet("practice_status", "awaiting_bet"),
+        ]

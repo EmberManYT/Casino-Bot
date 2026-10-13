@@ -3,9 +3,13 @@ version: "3.1"
 intents:
   - greet
   - start_blackjack
+  - get_blackjack_advice
+  - practice_blackjack
   - hit
   - stand
   - new_round
+  - affirm
+  - deny
 
 slots:
   user_input:
@@ -61,9 +65,84 @@ slots:
     mappings:
       - type: custom
 
+  blackjack_mode:
+    type: categorical
+    values: [advice, practice]
+    mappings:
+      - type: from_intent
+        intent: get_blackjack_advice
+        value: advice
+      - type: from_intent
+        intent: practice_blackjack
+        value: practice
+
+  starting_balance:
+    type: float
+    mappings:
+      - type: from_llm
+
+  practice_balance:
+    type: float
+    mappings:
+      - type: custom
+
+  practice_bet:
+    type: float
+    mappings:
+      - type: from_llm
+
+  practice_deck_id:
+    type: text
+    mappings:
+      - type: custom
+
+  cards_remaining:
+    type: float
+    mappings:
+      - type: custom
+
+  practice_player_hand:
+    type: any
+    mappings:
+      - type: custom
+
+  practice_dealer_hand:
+    type: any
+    mappings:
+      - type: custom
+
+  dealer_hole_card:
+    type: any
+    mappings:
+      - type: custom
+
+  practice_status:
+    type: categorical
+    values: [awaiting_balance, awaiting_bet, player_turn, round_complete, session_complete, api_error]
+    mappings:
+      - type: custom
+
+  round_result:
+    type: categorical
+    values: [win, loss, push]
+    mappings:
+      - type: custom
+
+  continue_playing:
+    type: bool
+    mappings:
+      - type: from_intent
+        intent: affirm
+        value: true
+      - type: from_intent
+        intent: deny
+        value: false
+
 responses:
   utter_greet:
-    - text: "Hi! I can give hit-or-stand blackjack advice."
+    - text: "Hi! Would you like blackjack advice, or would you like to practice by playing against me?"
+  utter_ask_blackjack_mode:
+    - text: "Would you like advice on your cards or a practice game?"
   utter_ask_initial_hand:
     - text: "What are your first two cards? For example: ace and 7."
   utter_invalid_initial_hand:
@@ -80,6 +159,14 @@ responses:
     - text: "Please give one card rank, such as '3', '10', or 'queen'."
   utter_round_complete:
     - text: "Round complete. Say 'new hand' when you want to play again."
+  utter_ask_starting_balance:
+    - text: "What starting balance would you like?"
+  utter_ask_practice_bet:
+    - text: "How much would you like to bet?"
+  utter_ask_continue_playing:
+    - text: "Would you like to play another round?"
+  utter_practice_session_complete:
+    - text: "Thanks for playing."
 
 actions:
   - action_start_blackjack
@@ -88,3 +175,8 @@ actions:
   - action_evaluate_blackjack
   - action_record_next_card
   - action_stand_blackjack
+  - action_validate_slot_mappings
+  - action_start_practice_blackjack
+  - action_deal_practice_blackjack
+  - action_play_practice_blackjack_move
+  - action_continue_practice_blackjack
